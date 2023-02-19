@@ -1,6 +1,7 @@
 import argparse
 import cv2
 import os
+import time
 
 # limit the number of cpus used by high performance libraries
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -15,6 +16,17 @@ import numpy as np
 from pathlib import Path
 import torch
 import torch.backends.cudnn as cudnn
+
+speed_line = {
+    0: {
+        'base': ((456, 728), (1164, 474)),
+        'left': ((276, 568), (861, 1071)),
+        'right': ((1027, 409), (1392, 580)),
+        'length': 20
+    }
+}
+
+object_speed = {}
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # yolov5 strongsort root directory
@@ -44,14 +56,44 @@ from yolov8.ultralytics.yolo.utils.plotting import Annotator, colors, save_one_b
 from trackers.multi_tracker_zoo import create_tracker
 
 
+def relavtivePos(line, point):
+    vl = (line[1][0] - line[0][0], line[1][1] - line[0][1])
+    vp = (point[0] - line[0][0], point[1] - line[0][1])
+
+    cross_product = vl[0] * vp[1] - vl[1] * vp[0]
+
+    # Return RIGHT if cross product is positive
+    if cross_product > 0:
+        return 'right'
+
+    # Return LEFT if cross product is negative
+    if cross_product < 0:
+        return 'left'
+
+    # Return ZERO if cross product is zero
+    return 'center'
+
+
+def objPosition(left_line, right_line, point):
+    left = relavtivePos(left_line, point)
+    right = relavtivePos(right_line, point)
+
+    if left == 'left':
+        return 'left'
+    if right == 'right':
+        return 'right'
+    return 'mid'
+
+
 @torch.no_grad()
 def run(
+        cam_id=0,
         source='0',
         yolo_weights=WEIGHTS / 'yolov5m.pt',  # model.pt path(s),
         reid_weights=WEIGHTS / 'osnet_x0_25_msmt17.pt',  # model.pt path,
         tracking_method='strongsort',
         tracking_config=ROOT / 'trackers' / 'strongsort' / 'configs' / 'strongsort.yaml',
-        imgsz=(640, 360),  # inference size (height, width)
+        imgsz=(1920, 1080),  # inference size (height, width)
         conf_thres=0.25,  # confidence threshold
         iou_thres=0.45,  # NMS IOU threshold
         max_det=1000,  # maximum detections per image
@@ -106,6 +148,8 @@ def run(
     model = AutoBackend(yolo_weights, device=device, dnn=dnn, fp16=half)
     stride, names, pt = model.stride, model.names, model.pt
     imgsz = check_imgsz(imgsz, stride=stride)  # check image size
+
+    bbox_results = []
 
     # Dataloader
     bs = 1
@@ -236,12 +280,19 @@ def run(
                                    255 if retina_masks else im[i]
                         )
 
+                    bbox_results = []
                     for j, (output) in enumerate(outputs[i]):
 
                         bbox = output[0:4]
                         id = output[4]
                         cls = output[5]
                         conf = output[6]
+                        bbox_results.append({
+                            'bbox': bbox,
+                            'id': id,
+                            'cls': cls,
+                            'conf': conf
+                        })
 
                         if save_txt:
                             # to MOT format
@@ -286,6 +337,39 @@ def run(
             #     cv2.imshow(str(p), im0)
             #     if cv2.waitKey(1) == ord('q'):  # 1 millisecond
             #         exit()
+
+            if cam_id in speed_line:
+                im0 = cv2.line(im0, speed_line[cam_id]['base'][0], speed_line[cam_id]['base'][1], (255, 0, 0), 4)
+                im0 = cv2.line(im0, speed_line[cam_id]['left'][0], speed_line[cam_id]['left'][1], (0, 0, 255), 4)
+                im0 = cv2.line(im0, speed_line[cam_id]['right'][0], speed_line[cam_id]['right'][1], (0, 0, 255), 4)
+
+            for result in bbox_results:
+                bbox_center = ((result['bbox'][0] + result['bbox'][2]) / 2,
+                               (result['bbox'][1] + result['bbox'][3]) / 2)
+
+                pos = objPosition(speed_line[cam_id]['left'], speed_line[cam_id]['right'], bbox_center)
+                direction = 'mid'
+                if pos == 'left':
+                    direction = 'right'
+                elif pos == 'right':
+                    direction = 'left'
+                if result['id'] not in object_speed:
+                    object_speed[result['id']] = {
+                        'passed': -1,
+                        'speed': -1,
+                        'direction': direction
+                    }
+                elif object_speed[result['id']]['passed'] == -1 and object_speed[
+                    result['id']] != 'mid' and pos == 'mid':
+                    object_speed[result['id']]['passed'] = 0
+                    object_speed[result['id']]['timestamp'] = time.time()
+
+                elif object_speed[result['id']]['passed'] == 0 and pos == object_speed[result['id']]['direction']:
+                    object_speed[result['id']]['passed'] = 1
+                    time_epoch = time.time() - object_speed[result['id']]
+                    object_speed[result['id']]['speed'] = speed_line[cam_id]['length'] / time_epoch
+
+            print(object_speed)
 
             # Save results (image with detections)
             if save_vid:

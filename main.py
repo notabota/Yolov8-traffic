@@ -25,8 +25,8 @@ cam_urls = ['https://www.youtube.com/watch?v=ttijFPbYtjg', 'https://www.youtube.
 @flask_app.route('/cam/<id>')
 def video_feed(id):
     return Response(
-        track.run(source=cam_urls[int(id)], yield_frame=True, yolo_weights=WEIGHTS / 'last.pt', show_vid=True,
-                  exist_ok=True, save_trajectories=True, update=True),
+        track.run(cam_id=int(id), source=cam_urls[int(id)], yield_frame=True, yolo_weights=WEIGHTS / 'last.pt',
+                  show_vid=True, exist_ok=True, save_trajectories=True, update=True),
         mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
